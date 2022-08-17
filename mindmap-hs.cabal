@@ -71,7 +71,9 @@ executable mindmap-hs
                       vty,
                       lens,
                       containers,
-                      aeson
+                      aeson,
+                      mtl,
+                      ghc
 
     -- Directories containing source files.
     hs-source-dirs:   app
