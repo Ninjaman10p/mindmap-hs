@@ -78,6 +78,8 @@ helpMessage progname = unlines
   , "  G[hjkl]: as per g[hjkl] but also move all child bubbles"
   , "  i/a: enter insert mode while bubble is selected"
   , "  escape: leave insert mode, or unselect bubble"
+  , "  ZZ: save and quit"
+  , "  ZQ: quit WITHOUT saving"
   ]
 
 runMindApp :: FilePath -> IO ()
@@ -323,6 +325,7 @@ collapseKeyStack = do
                                              . view bubbleZip $ focus'')
                   , _insertMode = True
                   }
+          'd':'d':_ -> Just $ deleteFocused
           'Q':'Z':_ -> Just halt
           'Z':'Z':_ -> Just $ saveMindMap >> halt
           'j':cs -> Just $ handleMotion cs _2 1
@@ -337,6 +340,20 @@ collapseKeyStack = do
         m
         modify $ set keyStack ""
       Nothing -> return ()
+
+deleteFocused :: MonadState MindApp m => m ()
+deleteFocused = do
+  focus' <- view focus <$> get
+  case focus' of
+    Left _ -> return ()
+    Right focus'' -> do
+      case view (bubbleZip . _2) focus'' of
+        [] -> do
+          let p = onBoth (+) (view subPos focus'') (view (bubbleZip . _1 . anchorPos) focus'')
+          modify $ set focus $ Left p
+        (b:bs) -> do
+          modify $ over focus . right . set bubbleZip $ (b, bs)
+          unselect
 
 enterInsert :: MonadState MindApp m => m ()
 enterInsert = modify $ over focus . right $ set insertMode True
@@ -399,7 +416,9 @@ underCursor b = do
   case target of
     Left p -> do
       let p0 = view anchorPos b
-          p1 = onBoth (+) p0 <<< stringWidth &&& stringHeight <<< view contents $ b
+          p1 = onBoth (\x -> (+x) . max 1) p0
+             <<< stringWidth &&& stringHeight
+             <<< view contents $ b
       return $ (uncurry (&&) $ onBoth (>=) p p0)
               && (uncurry (&&) $ onBoth (<=) p p1)
     Right _ -> return False
@@ -440,6 +459,7 @@ drawBubble :: Int -> Bubble -> Image
 drawBubble n b = shiftImage (view anchorPos b)
                . imageBorder (attrName "bubble-border" <> stimesMonoid n (attrName "sub"))
                . imageString (attrName "bubble" <> stimesMonoid n (attrName "sub"))
+               . (\cs -> if (foldr ((&&) . (== "")) True . lines $ cs) then " " else cs)
                . view contents $ b
 
 bubbleCenter :: Bubble -> (Int, Int)
