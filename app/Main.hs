@@ -330,6 +330,9 @@ collapseKeyStack = do
                                              . view bubbleZip $ focus'')
                   , _insertMode = True
                   }
+          'c':'c':cs -> Just . Right $ do
+            modify $ over focus . right . set (bubbleZip . _1 . contents) $ ""
+            enterInsert
           '\DC2':cs -> Just . Right $ motionLoop cs redo
           'u':cs -> Just . Left $ motionLoop cs undo
           'd':'d':_ -> Just . Right $ deleteFocused
@@ -354,6 +357,7 @@ redo = do
   fut <- view future <$> get
   case fut of
     (st:sts) -> do
+      unselect
       modify $ set future sts
       modify $ set saveState st
     _ -> return ()
@@ -363,6 +367,7 @@ undo = do
   hist <- view history <$> get
   case hist of
     (st:sts) -> do
+      unselect
       bs <- allBubbles
       curr <- set rootBubbles bs . view saveState <$> get
       modify $ over future (curr:)
