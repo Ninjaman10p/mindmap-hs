@@ -12,3 +12,9 @@
 
 * Added `u` keybinding to undo previous changes
 * Added `C-r` keybinding to redo previously undone changes
+
+## 0.1.3.0 -- YYYY-mm-dd
+
+* Added `cc` keybind to change an entire bubble at once
+* Added arrow key support
+* Fixed cursor to not move when selecting a bubble

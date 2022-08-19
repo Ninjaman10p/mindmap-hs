@@ -235,6 +235,10 @@ decodeBubble1 b = do
 
 handleKey :: V.Key -> [V.Modifier] -> EventM Name MindApp ()
 -- handleKey (V.KChar 'c') [V.MCtrl] = halt
+handleKey (V.KUp) [] = handleKChar 'k'
+handleKey (V.KDown) [] = handleKChar 'j'
+handleKey (V.KLeft) [] = handleKChar 'h'
+handleKey (V.KRight) [] = handleKChar 'l'
 handleKey (V.KChar 'r') [V.MCtrl] = handleKChar '\DC2'
 handleKey (V.KChar c) [] = handleKChar c
 handleKey (V.KChar c) [V.MShift] = handleKChar $ toUpper c
@@ -433,15 +437,16 @@ selectAtCursor :: MonadState MindApp m => m ()
 selectAtCursor = do
   bs <- view (saveState . rootBubbles) <$> get
   (msieved, rest) <- sieveM inTreeUnderCursor bs
-  case msieved of
-    Just zipper -> do
+  ep <- view focus <$> get
+  case (msieved, ep) of
+    (Just zipper, Left p) -> do
       modify $ set (saveState . rootBubbles) rest
       modify $ set focus . Right $ BubbleFocus
-        { _subPos = (0, 0)
+        { _subPos = onBoth (-) p (view (_1 . anchorPos) zipper)
         , _bubbleZip = zipper
         , _insertMode = False
         }
-    Nothing -> return ()
+    _ -> return ()
 
 inTreeUnderCursor :: MonadState MindApp m => Bubble -> m (Maybe (Bubble, [Bubble]))
 inTreeUnderCursor b = do
