@@ -1,4 +1,4 @@
-{-# LANGUAGE TemplateHaskell, FlexibleContexts, TupleSections, RankNTypes #-}
+{-# LANGUAGE TemplateHaskell, FlexibleContexts, TupleSections, RankNTypes, OverloadedStrings #-}
 module Main where
 
 import Brick
@@ -8,6 +8,11 @@ import Control.Lens (makeLenses, view, over, set, at, Lens', _1, _2)
 import Control.Monad
 -- import Control.Concurrent
 import Control.Arrow
+import System.Environment
+import System.Directory
+
+import Data.Aeson
+import Data.Aeson.Types (Parser)
 
 import Control.Monad.State.Class
 import Control.Monad.IO.Class
@@ -16,13 +21,10 @@ import Data.Traversable
 import qualified Data.Map as M
 import Data.Maybe
 import Text.Read (readMaybe)
-import GHC.Data.Maybe (firstJust)
 import Data.Char (toUpper)
 import Data.Semigroup
 
 type Image = M.Map (Int, Int) (Char, AttrName)
-
-data Motion = JK Int | HL Int
 
 data Bubble = Bubble
   { _contents :: String
@@ -31,6 +33,13 @@ data Bubble = Bubble
   } deriving (Eq, Ord, Show)
 $(makeLenses ''Bubble)
 
+data BubbleFocus = BubbleFocus
+  { _subPos :: (Int, Int)
+  , _bubbleZip :: (Bubble, [Bubble])
+  , _insertMode :: Bool
+  } deriving (Eq, Ord, Show)
+$(makeLenses ''BubbleFocus)
+
 data MindMap = MindMap
   { _rootBubbles :: [Bubble]
   } deriving (Eq, Ord, Show)
@@ -38,9 +47,10 @@ $(makeLenses ''MindMap)
 
 data MindApp = MindApp
   { _saveState :: MindMap
-  , _focus :: Either (Int, Int) ((Int, Int), (Bubble, [Bubble]))
+  , _focus :: Either (Int, Int) BubbleFocus
   , _screenOffset :: (Int, Int)
   , _keyStack :: String
+  , _filename :: FilePath
   } deriving (Eq, Ord, Show)
 $(makeLenses ''MindApp)
 
@@ -48,16 +58,45 @@ type Name = ()
 type Event = ()
 
 main :: IO ()
-main = runMindApp newMindMap
+main = do
+  progname <- getProgName
+  args <- getArgs
+  case args of
+    [] -> putStrLn $ helpMessage progname
+    "--help":_ -> putStrLn $ helpMessage progname
+    fp:_ -> runMindApp fp
 
-runMindApp :: MindMap -> IO ()
-runMindApp s = do
+helpMessage :: String -> String
+helpMessage progname = unlines
+  [ "Usage: " <> progname <> " FILENAME"
+  , ""
+  , "KEYBINDINGS:"
+  , "  [hjkl]: move cursor"
+  , "  enter: select bubble under cursor"
+  , "  gn: create a new bubble"
+  , "  g[hjkl]: move currently selected bubble"
+  , "  G[hjkl]: as per g[hjkl] but also move all child bubbles"
+  , "  i/a: enter insert mode while bubble is selected"
+  , "  escape: leave insert mode, or unselect bubble"
+  ]
+
+runMindApp :: FilePath -> IO ()
+runMindApp fp = do
+  fpExists <- doesFileExist fp
+  s <-
+    if fpExists
+    then
+      fromMaybe (error "file corrupted or not a mindmap file; try opening with a text editor")
+        <$> decodeFileStrict fp
+    else
+      return newMindMap
   let builder = V.mkVty V.defaultConfig
       appState = MindApp
         { _saveState = s
         , _focus = Left (5, 5)
         , _screenOffset = (0, 0)
         , _keyStack = ""
+        , _filename = fp
         }
   initialVty <- builder
   void $ customMain initialVty builder Nothing mindAppInstructions appState
@@ -72,7 +111,8 @@ mindAppInstructions = App
           }
 
 drawMindMaps :: MindApp -> Widget Name
-drawMindMaps st = collapseImage $ drawCursor st . foldr M.union M.empty $
+drawMindMaps st = collapseImage . shiftImage (join (***) (0-) $ view screenOffset $ st) $
+  drawCursor st . foldr M.union M.empty $
   drawBubbleTree <$> view (saveState . rootBubbles) st
 
 handleEvent :: BrickEvent Name Event -> EventM Name MindApp ()
@@ -86,7 +126,7 @@ mkAttrMap _ = attrMap (fg V.white) . foldr (<>) [] $
   ] where
     bubbleGroup = do
       variant <- attrName <$> ["bubble", "bubble-border"]
-      (layer, style) <- (id *** fg) <$>
+      (layer, style) <- second fg <$>
         [ (0 :: Int, V.blue)
         , (1, V.cyan)
         , (2, V.green)
@@ -102,70 +142,195 @@ mkAttrMap _ = attrMap (fg V.white) . foldr (<>) [] $
       return $ (attrName "cursor" <> variant, V.black `on` color)
 
 newMindMap :: MindMap
-newMindMap = MindMap
-  [ Bubble "hello" (50, 25)
-      [ Bubble "world" (40, 20) []
-      , Bubble "haskell" (60, 20)
-          [ Bubble "→ " (70, 17) []
-          , Bubble "λ" (70, 23) []
-          , Bubble "Brick" (55, 15)
-              [ Bubble "Graphics.Vty" (40, 10) []
-              , Bubble "TUI Graphics" (60, 10) []
-              ]
-          ]
-      , Bubble "from the other side" (50, 30) []
-      , Bubble "uwu" (36, 23) []
-      , Bubble "hackathon" (35, 27)
-          [ Bubble "o/" (24, 29) []
-          ]
-      ]
-  , Bubble "yeet" (0, 0) []
-  ]
+-- newMindMap = MindMap
+  -- [ Bubble "hello" (50, 25)
+      -- [ Bubble "world" (40, 20) []
+      -- , Bubble "haskell" (60, 20)
+          -- [ Bubble "→ " (70, 17) []
+          -- , Bubble "λ" (70, 23) []
+          -- , Bubble "Brick" (55, 15)
+              -- [ Bubble "Graphics.Vty" (40, 10) []
+              -- , Bubble "TUI Graphics" (60, 10) []
+              -- ]
+          -- ]
+      -- , Bubble "from the other side" (50, 30) []
+      -- , Bubble "uwu" (36, 23) []
+      -- , Bubble "hackathon" (35, 27)
+          -- [ Bubble "o/" (24, 29) []
+          -- ]
+      -- ]
+  -- , Bubble "yeet" (0, 0) []
+  -- ]
+newMindMap = MindMap []
+
+{-------------------------------
+ - JSON
+ ------------------------------}
+
+saveMindMap :: (MonadState MindApp m, MonadIO m) => m ()
+saveMindMap = do
+  unselect
+  fp <- view filename <$> get
+  st <- view saveState <$> get
+  liftIO $ encodeFile fp st
+
+fileVersion :: Int
+fileVersion = 1
+
+instance ToJSON MindMap where
+  toJSON mindmap = object
+    [ "version" .= fileVersion
+    , "root-bubbles" .= view rootBubbles mindmap
+    ]
+
+instance ToJSON Bubble where
+  toJSON b = object
+    [ "contents" .= view contents b
+    , "children" .= view children b
+    , "anchor-pos" .= view anchorPos b
+    ]
+
+fromValue :: Value -> Maybe Object
+fromValue (Object v) = Just v
+fromValue _ = Nothing
+
+instance FromJSON MindMap where
+  parseJSON = withObject "MindMap" $ \v -> do
+    version <- v .: "version" :: Parser Int
+    case version of
+      1 -> decodeMindMap1 v
+      _ -> fail $ "File has been corrupted / version unknown."
+                <> " Try looking at it as plain JSON for issues"
+
+decodeMindMap1 :: Object -> Parser MindMap
+decodeMindMap1 v = do
+  decodedBs <- sequence . map decodeBubble1 =<< v .: "root-bubbles"
+  return $ MindMap
+    { _rootBubbles = decodedBs
+    }
+
+decodeBubble1 :: Value -> Parser Bubble
+decodeBubble1 b = do
+  case fromValue b of
+    Just v -> do
+      children' <- sequence . map decodeBubble1 =<< v .: "children"
+      contents' <- v .: "contents"
+      anchorPos' <- v .: "anchor-pos"
+      return $ Bubble
+        { _children = children'
+        , _anchorPos = anchorPos'
+        , _contents = contents'
+        }
+    Nothing -> fail "Corrupted child"
 
 {-------------------------------
  - Motions
  ------------------------------}
 
 handleKey :: V.Key -> [V.Modifier] -> EventM Name MindApp ()
-handleKey (V.KChar 'c') [V.MCtrl] = halt
-handleKey (V.KChar c) [] = do
-  modify $ over keyStack (c :) -- stored in REVERSE ORDER
-  collapseKeyStack
-handleKey (V.KChar c) [V.MShift] = do
-  modify $ over keyStack (toUpper c :) -- stored in REVERSE ORDER
-  collapseKeyStack
-handleKey (V.KEnter) [] = selectAtCursor
+-- handleKey (V.KChar 'c') [V.MCtrl] = halt
+handleKey (V.KChar c) [] = handleKChar c
+handleKey (V.KChar c) [V.MShift] = handleKChar $ toUpper c
+handleKey (V.KEnter) [] = do
+  ins <- either (const False) (view insertMode) . view focus <$> get
+  if ins
+    then handleKChar '\n'
+    else selectAtCursor
+handleKey (V.KBS) [] = do
+  focus' <- view focus <$> get
+  case focus' of
+    Right (focus''@(BubbleFocus {_insertMode = True})) -> do
+      let p = view subPos focus''
+          contentLines = lines . view (bubbleZip . _1 . contents) $ focus''
+          bsLine = foldr (\(n, c) -> if n + 1 == view _1 p then id else (c:)) [] . mkIndices
+      modify $ over focus . right . set (bubbleZip . _1 . contents) . unlines $ 
+        foldr (\(n, cs) -> if n == view _2 p then (bsLine cs:) else (cs:)) [] $
+          mkIndices contentLines
+      modify $ over focus . right $ over (subPos . _1) (+ (-1))
+    _ -> return ()
+    
 handleKey (V.KEsc) [] = unselect
 handleKey _ _ = return ()
--- handleKey (V.KChar 'j') ms = handleMove ms $ JK 1
--- handleKey (V.KChar 'k') ms = handleMove ms $ JK (-1)
--- handleKey (V.KChar 'h') ms = handleMove ms $ HL (-1)
--- handleKey (V.KChar 'l') ms = handleMove ms $ HL 1
--- handleKey (V.KChar c) []
-  -- | '0' <= c && c <= '9' = do
-      -- let n = read [c]
-      -- modify $ over motionLoop $ (+n) . (*10)
--- handleKey _ _ = return ()
+
+handleKChar :: Char -> EventM Name MindApp ()
+handleKChar c = do
+  focus' <- view focus <$> get
+  case focus' of
+    Right (focus''@(BubbleFocus {_insertMode = True})) -> do
+      let contentLines = lines . view (bubbleZip . _1 . contents) $ focus''
+          p = view subPos focus''
+      if length contentLines == 0
+        then modify $ over focus . right . set (bubbleZip . _1 . contents) $ [c]
+        else do
+          let insertLine l =
+                if length l <= view _1 p
+                  then (l <> [c])
+                  else foldr (\(n, c') -> if n == view _1 p then (c:) . (c':) else (c':)) []
+                       . mkIndices $ l
+          modify $ over focus . right . set (bubbleZip . _1 . contents) . unlines $
+            foldr (\(n, cs) -> if n == view _2 p then (insertLine cs:) else (cs:)) [] $
+              mkIndices $ contentLines
+      if c == '\n'
+        then modify $ over focus . right $ set (subPos . _1) 0 . over (subPos . _2) (+1)
+        else modify $ over focus . right $ over (subPos . _1) (+1)
+    _ -> do
+      modify $ over keyStack (c :) -- stored in REVERSE ORDER
+      collapseKeyStack
 
 handleMove :: MonadState MindApp m => Lens' (Int, Int) Int -> Int -> m ()
-handleMove l n = modify $ over focus $ over l (+n) +++ over (_1 . l) (+n)
+handleMove l n = modify $ over focus $ over l (+n) +++ over (subPos . l) (+n)
 
 handleShift :: MonadState MindApp m => Lens' (Int, Int) Int -> Int -> m ()
-handleShift l n = modify $ over focus . right . over (_2 . _1 . anchorPos . l) $ (+n)
+handleShift l n = modify $ over focus . right . over (bubbleZip . _1 . anchorPos . l) $ (+n)
 
 handleShiftDeep :: MonadState MindApp m => Lens' (Int, Int) Int -> Int -> m ()
-handleShiftDeep l n = modify . over focus . right . over (_2 . _1) $ _handleShiftDeep l n
-  where _handleShiftDeep l n = over (anchorPos . l) (+n)
-                             . over children (fmap $ _handleShiftDeep l n)
+handleShiftDeep l n = modify . over focus . right . over (bubbleZip . _1) $ _handleShiftDeep
+  where _handleShiftDeep = over (anchorPos . l) (+n)
+                         . over children (fmap $ _handleShiftDeep)
 
-collapseKeyStack :: MonadState MindApp m => m ()
+moveScreen :: MonadState MindApp m => Lens' (Int, Int) Int -> Int -> m ()
+moveScreen l n = modify $ over (screenOffset . l) (+n)
+
+collapseKeyStack :: EventM Name MindApp ()
 collapseKeyStack = do
     keyStack' <- view keyStack <$> get
     let action = case keyStack' of
+          'n':'g':_ -> Just $ do
+            focus' <- view focus <$> get
+            case focus' of
+              Left p -> do
+                let newBubble = Bubble
+                      { _contents = ""
+                      , _anchorPos = p
+                      , _children = []
+                      }
+                modify $ set focus . Right $ BubbleFocus
+                  { _subPos = (0, 0)
+                  , _bubbleZip = (newBubble, [])
+                  , _insertMode = True
+                  }
+              Right focus'' -> do
+                let p = onBoth (+) (view subPos focus'')
+                                   (view (bubbleZip . _1 . anchorPos ) focus'')
+                    newBubble = Bubble
+                      { _contents = ""
+                      , _anchorPos = p
+                      , _children = []
+                      }
+                modify $ set focus . Right $ BubbleFocus
+                  { _subPos = (0, 0)
+                  , _bubbleZip = (newBubble, uncurry (flip (<>) . return)
+                                             . view bubbleZip $ focus'')
+                  , _insertMode = True
+                  }
+          'Q':'Z':_ -> Just halt
+          'Z':'Z':_ -> Just $ saveMindMap >> halt
           'j':cs -> Just $ handleMotion cs _2 1
           'k':cs -> Just $ handleMotion cs _2 (-1)
           'h':cs -> Just $ handleMotion cs _1 (-1)
           'l':cs -> Just $ handleMotion cs _1 1
+          'i':_ -> Just $ enterInsert
+          'a':_ -> Just $ handleMotion [] _1 1 >> enterInsert
           _ -> Nothing
     case action of
       Just m -> do
@@ -173,9 +338,13 @@ collapseKeyStack = do
         modify $ set keyStack ""
       Nothing -> return ()
 
+enterInsert :: MonadState MindApp m => m ()
+enterInsert = modify $ over focus . right $ set insertMode True
+
 handleMotion :: MonadState MindApp m => String -> Lens' (Int, Int) Int -> Int -> m ()
 handleMotion ('g':cs) l = motionLoop cs . handleShift l
 handleMotion ('G':cs) l = motionLoop cs . handleShiftDeep l
+handleMotion ('z':cs) l = motionLoop cs . moveScreen l
 handleMotion cs l = motionLoop cs . handleMove l
 
 motionLoop :: MonadState MindApp m => String -> m () -> m ()
@@ -187,18 +356,28 @@ unselect = do
   focus' <- view focus <$> get
   case focus' of
     Left _ -> return ()
-    Right (p, zs) -> do
-      modify $ set focus . Left $ onBoth (+) p $ view (_1 . anchorPos) zs
-      modify $ over (saveState . rootBubbles) . (:) $ unzipBubbles zs
+    Right focus'' -> do
+      let p = view subPos focus''
+          zs = view bubbleZip focus''
+          ins = view insertMode focus''
+      if ins
+        then modify $ over focus . right $ set insertMode False
+        else do
+          modify $ set focus . Left $ onBoth (+) p $ view (_1 . anchorPos) zs
+          modify $ over (saveState . rootBubbles) . (:) $ unzipBubbles zs
 
 selectAtCursor :: MonadState MindApp m => m ()
 selectAtCursor = do
   bs <- view (saveState . rootBubbles) <$> get
-  (msieved, rem) <- sieveM inTreeUnderCursor bs
+  (msieved, rest) <- sieveM inTreeUnderCursor bs
   case msieved of
     Just zipper -> do
-      modify $ set (saveState . rootBubbles) rem
-      modify $ set focus . Right $ ((0, 0), zipper)
+      modify $ set (saveState . rootBubbles) rest
+      modify $ set focus . Right $ BubbleFocus
+        { _subPos = (0, 0)
+        , _bubbleZip = zipper
+        , _insertMode = False
+        }
     Nothing -> return ()
 
 inTreeUnderCursor :: MonadState MindApp m => Bubble -> m (Maybe (Bubble, [Bubble]))
@@ -233,11 +412,15 @@ unzipBubbles = uncurry $ foldr (flip $ over children . (:))
  -------------------------------}
 
 drawCursor :: MindApp -> Image -> Image
-drawCursor app = case view focus app of
+drawCursor st = case view focus st of
                   Left p -> over (at p) $ _drawCursor mempty
-                  Right (p, bs) ->
-                    let p' = onBoth (+) p $ view (_1 . anchorPos) bs
-                        drawCursor' = over (at p') (_drawCursor $ attrName "selected")
+                  Right foc' ->
+                    let p = view subPos foc'
+                        bs = view bubbleZip foc'
+                        ins = view insertMode foc'
+                        p' = onBoth (+) p $ view (_1 . anchorPos) bs
+                        a = attrName $ if ins then "insert" else "selected"
+                        drawCursor' = over (at p') (_drawCursor a)
                     in (drawCursor' .) . M.union . drawBubbleTree . unzipBubbles $ bs
   where _drawCursor m Nothing = Just (' ', attrName "cursor" <> m)
         _drawCursor m (Just (c, _)) = Just (c, attrName "cursor" <> m)
@@ -348,7 +531,7 @@ getImageBounds = M.foldrWithKey (const . onBoth max) (0, 0)
 chartPositions :: [[a]] -> M.Map (Int, Int) a
 chartPositions = M.fromList . join
                . fmap (uncurry $ \y -> fmap $ \(x, c) -> ((x, y), c))
-               . fmap (id *** mkIndices)
+               . fmap (second mkIndices)
                . mkIndices
 
 {---------------------------
@@ -360,7 +543,7 @@ sieveM f (x:xs) = do
   result <- f x
   case result of
     Just b -> return $ (Just b, xs)
-    Nothing -> (id *** (x:)) <$> sieveM f xs
+    Nothing -> second (x:) <$> sieveM f xs
 sieveM _ [] = return (Nothing, [])
 
 sieve :: (a -> Maybe b) -> [a] -> (Maybe b, [a])

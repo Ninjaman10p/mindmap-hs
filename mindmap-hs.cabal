@@ -73,7 +73,9 @@ executable mindmap-hs
                       containers,
                       aeson,
                       mtl,
-                      ghc
+                      ghc,
+                      extra,
+                      directory
 
     -- Directories containing source files.
     hs-source-dirs:   app
