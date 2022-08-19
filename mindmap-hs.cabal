@@ -75,7 +75,8 @@ executable mindmap-hs
                       mtl,
                       ghc,
                       directory,
-                      terminal-size
+                      terminal-size,
+                      safe
 
     -- Directories containing source files.
     hs-source-dirs:   app

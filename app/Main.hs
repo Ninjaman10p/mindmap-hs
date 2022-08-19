@@ -11,6 +11,7 @@ import Control.Arrow
 import System.Environment
 import System.Directory
 import qualified System.Console.Terminal.Size as Terminal
+import Safe (lastMay, initMay)
 
 import Data.Aeson
 import Data.Aeson.Types (Parser)
@@ -127,6 +128,7 @@ drawMindMaps st = collapseImage . shiftImage (join (***) (0-) $ view screenOffse
 
 handleEvent :: BrickEvent Name Event -> EventM Name MindApp ()
 handleEvent (VtyEvent (V.EvKey k ms)) = handleKey k ms
+handleEvent (VtyEvent (V.EvResize x y)) = modify $ set terminalSize (x, y)
 handleEvent _ = return ()
 
 mkAttrMap :: MindApp -> AttrMap
@@ -141,6 +143,8 @@ mkAttrMap _ = attrMap (fg V.white) . foldr (<>) [] $
         , (1, V.cyan)
         , (2, V.green)
         , (3, V.yellow)
+        -- , (4, V.red)
+        -- , (5, V.magenta)
         ]
       return $ (variant <> stimesMonoid layer (attrName "sub"), style)
     cursorGroup = do
@@ -414,13 +418,14 @@ deleteFocused = do
   case focus' of
     Left _ -> return ()
     Right focus'' -> do
-      case view (bubbleZip . _2) focus'' of
-        [] -> do
-          let p = onBoth (+) (view subPos focus'') (view (bubbleZip . _1 . anchorPos) focus'')
-          modify $ set focus $ Left p
-        (b:bs) -> do
+      let notDeletedZip = view (bubbleZip . _2) focus''
+      case initMay &&& lastMay $ notDeletedZip of
+        (Just bs, Just b) -> do
           modify $ over focus . right . set bubbleZip $ (b, bs)
           unselect
+        _ -> do
+          let p = onBoth (+) (view subPos focus'') (view (bubbleZip . _1 . anchorPos) focus'')
+          modify $ set focus $ Left p
 
 enterInsert :: MonadState MindApp m => m ()
 enterInsert = modify $ over focus . right $ set insertMode True
