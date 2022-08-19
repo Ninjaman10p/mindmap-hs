@@ -74,7 +74,8 @@ executable mindmap-hs
                       aeson,
                       mtl,
                       ghc,
-                      directory
+                      directory,
+                      terminal-size
 
     -- Directories containing source files.
     hs-source-dirs:   app

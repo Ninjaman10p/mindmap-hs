@@ -10,6 +10,7 @@ import Control.Monad
 import Control.Arrow
 import System.Environment
 import System.Directory
+import qualified System.Console.Terminal.Size as Terminal
 
 import Data.Aeson
 import Data.Aeson.Types (Parser)
@@ -53,6 +54,7 @@ data MindApp = MindApp
   , _filename :: FilePath
   , _history :: [MindMap]
   , _future :: [MindMap]
+  , _terminalSize :: (Int, Int)
   } deriving (Eq, Ord, Show)
 $(makeLenses ''MindApp)
 
@@ -94,6 +96,7 @@ runMindApp fp = do
         <$> decodeFileStrict fp
     else
       return newMindMap
+  Terminal.Window sy sx <- fromMaybe (Terminal.Window 20 20) <$> Terminal.size
   let builder = V.mkVty V.defaultConfig
       appState = MindApp
         { _saveState = s
@@ -103,6 +106,7 @@ runMindApp fp = do
         , _filename = fp
         , _history = []
         , _future = []
+        , _terminalSize = (sx, sy)
         }
   initialVty <- builder
   void $ customMain initialVty builder Nothing mindAppInstructions appState
@@ -334,7 +338,12 @@ collapseKeyStack = do
                                              . view bubbleZip $ focus'')
                   , _insertMode = True
                   }
-          'c':'c':cs -> Just . Right $ do
+          'z':'z':_ -> Just . Left $ do
+            p <- cursorTruePos
+            sxy <- view terminalSize <$> get
+            modify $ set screenOffset $ onBoth (-) p $
+              join (***) (`quot` 2) sxy
+          'c':'c':_ -> Just . Right $ do
             modify $ over focus . right . set (bubbleZip . _1 . contents) $ ""
             enterInsert
           '\DC2':cs -> Just . Right $ motionLoop cs redo
@@ -384,6 +393,14 @@ allBubbles = do
   bs <- view (saveState . rootBubbles) <$> get
   b <- either (const Nothing) (Just . unzipBubbles . view bubbleZip) . view focus <$> get
   return $ fromMaybe id ((:) <$> b) $ bs
+
+cursorTruePos :: MonadState MindApp m => m (Int, Int)
+cursorTruePos = do
+  focus' <- view focus <$> get
+  case focus' of
+    Left p -> return p
+    Right focus'' -> return $
+      onBoth (+) (view subPos focus'') (view (bubbleZip . _1 . anchorPos) focus'')
 
 updateHistory :: MonadState MindApp m => m ()
 updateHistory = do

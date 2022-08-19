@@ -18,3 +18,4 @@
 * Added `cc` keybind to change an entire bubble at once
 * Added arrow key support
 * Fixed cursor to not move when selecting a bubble
+* Added `zz` to center the screen on the cursor
