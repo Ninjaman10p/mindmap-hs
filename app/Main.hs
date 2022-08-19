@@ -52,6 +52,7 @@ data MindApp = MindApp
   , _keyStack :: String
   , _filename :: FilePath
   , _history :: [MindMap]
+  , _future :: [MindMap]
   } deriving (Eq, Ord, Show)
 $(makeLenses ''MindApp)
 
@@ -101,6 +102,7 @@ runMindApp fp = do
         , _keyStack = ""
         , _filename = fp
         , _history = []
+        , _future = []
         }
   initialVty <- builder
   void $ customMain initialVty builder Nothing mindAppInstructions appState
@@ -233,6 +235,7 @@ decodeBubble1 b = do
 
 handleKey :: V.Key -> [V.Modifier] -> EventM Name MindApp ()
 -- handleKey (V.KChar 'c') [V.MCtrl] = halt
+handleKey (V.KChar 'r') [V.MCtrl] = handleKChar '\DC2'
 handleKey (V.KChar c) [] = handleKChar c
 handleKey (V.KChar c) [V.MShift] = handleKChar $ toUpper c
 handleKey (V.KEnter) [] = do
@@ -327,6 +330,7 @@ collapseKeyStack = do
                                              . view bubbleZip $ focus'')
                   , _insertMode = True
                   }
+          '\DC2':cs -> Just . Right $ motionLoop cs redo
           'u':cs -> Just . Left $ motionLoop cs undo
           'd':'d':_ -> Just . Right $ deleteFocused
           'Q':'Z':_ -> Just . Left $ halt
@@ -345,22 +349,38 @@ collapseKeyStack = do
         modify $ set keyStack ""
       Nothing -> return ()
 
-undo :: (MonadIO m, MonadState MindApp m) => m ()
+redo :: MonadState MindApp m => m ()
+redo = do
+  fut <- view future <$> get
+  case fut of
+    (st:sts) -> do
+      modify $ set future sts
+      modify $ set saveState st
+    _ -> return ()
+
+undo :: MonadState MindApp m => m ()
 undo = do
   hist <- view history <$> get
   case hist of
     (st:sts) -> do
-      -- liftIO $ appendFile "log.tmp" $ show (st, sts)
+      bs <- allBubbles
+      curr <- set rootBubbles bs . view saveState <$> get
+      modify $ over future (curr:)
       modify $ set saveState st
       modify $ set history sts
-    [] -> error "empty history"
+    [] -> return ()
+
+allBubbles :: MonadState MindApp m => m [Bubble]
+allBubbles = do
+  bs <- view (saveState . rootBubbles) <$> get
+  b <- either (const Nothing) (Just . unzipBubbles . view bubbleZip) . view focus <$> get
+  return $ fromMaybe id ((:) <$> b) $ bs
 
 updateHistory :: MonadState MindApp m => m ()
 updateHistory = do
   st <- view saveState <$> get
-  b <- either (const Nothing) (Just . view bubbleZip) . view focus <$> get
-  let st' = fromMaybe id (over rootBubbles . (:) . unzipBubbles <$> b) $ st
-  modify $ over history (st':)
+  bs <- allBubbles
+  modify $ over history (set rootBubbles bs st :)
 
 deleteFocused :: MonadState MindApp m => m ()
 deleteFocused = do

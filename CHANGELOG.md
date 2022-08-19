@@ -11,3 +11,4 @@
 ## 0.1.2.0 -- 2022-08-19
 
 * Added `u` keybinding to undo previous changes
+* Added `C-r` keybinding to redo previously undone changes
