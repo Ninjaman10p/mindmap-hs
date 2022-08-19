@@ -51,6 +51,7 @@ data MindApp = MindApp
   , _screenOffset :: (Int, Int)
   , _keyStack :: String
   , _filename :: FilePath
+  , _history :: [MindMap]
   } deriving (Eq, Ord, Show)
 $(makeLenses ''MindApp)
 
@@ -99,6 +100,7 @@ runMindApp fp = do
         , _screenOffset = (0, 0)
         , _keyStack = ""
         , _filename = fp
+        , _history = []
         }
   initialVty <- builder
   void $ customMain initialVty builder Nothing mindAppInstructions appState
@@ -297,7 +299,7 @@ collapseKeyStack :: EventM Name MindApp ()
 collapseKeyStack = do
     keyStack' <- view keyStack <$> get
     let action = case keyStack' of
-          'n':'g':_ -> Just $ do
+          'n':'g':_ -> Just . Right $ do
             focus' <- view focus <$> get
             case focus' of
               Left p -> do
@@ -325,21 +327,40 @@ collapseKeyStack = do
                                              . view bubbleZip $ focus'')
                   , _insertMode = True
                   }
-          'd':'d':_ -> Just $ deleteFocused
-          'Q':'Z':_ -> Just halt
-          'Z':'Z':_ -> Just $ saveMindMap >> halt
-          'j':cs -> Just $ handleMotion cs _2 1
-          'k':cs -> Just $ handleMotion cs _2 (-1)
-          'h':cs -> Just $ handleMotion cs _1 (-1)
-          'l':cs -> Just $ handleMotion cs _1 1
-          'i':_ -> Just $ enterInsert
-          'a':_ -> Just $ handleMotion [] _1 1 >> enterInsert
+          'u':cs -> Just . Left $ motionLoop cs undo
+          'd':'d':_ -> Just . Right $ deleteFocused
+          'Q':'Z':_ -> Just . Left $ halt
+          'Z':'Z':_ -> Just . Left $ saveMindMap >> halt
+          'j':cs -> Just . Left $ handleMotion cs _2 1
+          'k':cs -> Just . Left $ handleMotion cs _2 (-1)
+          'h':cs -> Just . Left $ handleMotion cs _1 (-1)
+          'l':cs -> Just . Left $ handleMotion cs _1 1
+          'i':_ -> Just . Right $ enterInsert
+          'a':_ -> Just . Right $ handleMotion [] _1 1 >> enterInsert
           _ -> Nothing
     case action of
-      Just m -> do
+      Just em -> do
+        let m = either id (updateHistory >>) em
         m
         modify $ set keyStack ""
       Nothing -> return ()
+
+undo :: (MonadIO m, MonadState MindApp m) => m ()
+undo = do
+  hist <- view history <$> get
+  case hist of
+    (st:sts) -> do
+      -- liftIO $ appendFile "log.tmp" $ show (st, sts)
+      modify $ set saveState st
+      modify $ set history sts
+    [] -> error "empty history"
+
+updateHistory :: MonadState MindApp m => m ()
+updateHistory = do
+  st <- view saveState <$> get
+  b <- either (const Nothing) (Just . view bubbleZip) . view focus <$> get
+  let st' = fromMaybe id (over rootBubbles . (:) . unzipBubbles <$> b) $ st
+  modify $ over history (st':)
 
 deleteFocused :: MonadState MindApp m => m ()
 deleteFocused = do

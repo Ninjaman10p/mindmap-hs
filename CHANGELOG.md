@@ -7,3 +7,7 @@
 ## 0.1.1.0 -- 2022-08-19
 
 * Added `dd` keybinding to delete currently selected bubble
+
+## 0.1.2.0 -- 2022-08-19
+
+* Added `u` keybinding to undo previous changes
