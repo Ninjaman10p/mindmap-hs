@@ -268,7 +268,9 @@ handleKey (V.KBS) [] = do
       modify $ over focus . right $ over (subPos . _1) (+ (-1))
     _ -> return ()
     
-handleKey (V.KEsc) [] = unselect
+handleKey (V.KEsc) [] = do
+  modify $ set keyStack []
+  unselect
 handleKey _ _ = return ()
 
 handleKChar :: Char -> EventM Name MindApp ()

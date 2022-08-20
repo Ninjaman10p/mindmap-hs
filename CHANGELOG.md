@@ -20,3 +20,4 @@
 * Fixed cursor to not move when selecting a bubble
 * Added `zz` to center the screen on the cursor
 * Fixed issue where `dd` rearrange the tree
+* Escape now clears the keystack
