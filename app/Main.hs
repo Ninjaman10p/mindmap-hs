@@ -122,9 +122,13 @@ mindAppInstructions = App
           }
 
 drawMindMaps :: MindApp -> Widget Name
-drawMindMaps st = collapseImage . shiftImage (join (***) (0-) $ view screenOffset $ st) $
+drawMindMaps st = collapseImage . limitImage (view terminalSize st) $
+  shiftImage (join (***) (0-) $ view screenOffset $ st) $
   drawCursor st . foldr M.union M.empty $
   drawBubbleTree <$> view (saveState . rootBubbles) st
+
+limitImage :: (Int, Int) -> M.Map (Int, Int) a -> M.Map (Int, Int) a
+limitImage p = M.filterWithKey (return . uncurry (&&) <<< onBoth (>) p)
 
 handleEvent :: BrickEvent Name Event -> EventM Name MindApp ()
 handleEvent (VtyEvent (V.EvKey k ms)) = handleKey k ms
