@@ -15,6 +15,7 @@ import qualified System.Console.Terminal.Size as Terminal
 import Safe (lastMay, initMay)
 
 import Data.List.Extra ((!?))
+import GHC.Data.Maybe (firstJust)
 
 import Data.Aeson
 import Data.Aeson.Types (Parser)
@@ -30,6 +31,11 @@ import Data.Char (toUpper)
 import Data.Semigroup
 
 type Image = M.Map (Int, Int) (Char, AttrName)
+
+data Preferences = Preferences
+  { _colorfulMode :: Bool
+  } deriving (Eq, Ord, Show)
+$(makeLenses ''Preferences)
 
 data Bubble = Bubble
   { _contents :: String
@@ -59,6 +65,7 @@ data MindApp = MindApp
   , _history :: [MindMap]
   , _future :: [MindMap]
   , _terminalSize :: (Int, Int)
+  , _preferences :: Preferences
   } deriving (Eq, Ord, Show)
 $(makeLenses ''MindApp)
 
@@ -69,10 +76,31 @@ main :: IO ()
 main = do
   progname <- getProgName
   args <- getArgs
-  case args of
-    [] -> putStrLn $ helpMessage progname
-    "--help":_ -> putStrLn $ helpMessage progname
-    fp:_ -> runMindApp fp
+  if getBoolOpt "help" False args
+    then putStrLn $ helpMessage progname
+    else case getFileTarget args of
+      Nothing -> putStrLn $ helpMessage progname
+      Just fp -> runMindApp fp $ getPreferences args
+      
+getPreferences :: [String] -> Preferences
+getPreferences args = Preferences
+  { _colorfulMode = getBoolOpt "colorful" False args
+  }
+
+getFileTarget :: [String] -> Maybe String
+getFileTarget (fp:_) = Just fp
+getFileTarget _ = Nothing
+
+getBoolOpt :: String -> Bool -> [String] -> Bool
+getBoolOpt cs = foldl $ flip parseBoolArg
+  where parseBoolArg arg | arg == "--" <> cs = const True
+                         | arg == "--no-" <> cs = const False
+                         | otherwise = id
+
+getOpts :: String -> [String] -> Maybe String
+getOpts cs (arg:val:args) | "--" <> cs == arg = firstJust (getOpts cs args) (Just val)
+getOpts cs (_:args) = getOpts cs args
+getOpts _ _ = Nothing
 
 helpMessage :: String -> String
 helpMessage progname = unlines
@@ -90,8 +118,8 @@ helpMessage progname = unlines
   , "  ZQ: quit WITHOUT saving"
   ]
 
-runMindApp :: FilePath -> IO ()
-runMindApp fp = do
+runMindApp :: FilePath -> Preferences -> IO ()
+runMindApp fp pref = do
   fpExists <- doesFileExist fp
   s <-
     if fpExists
@@ -111,6 +139,7 @@ runMindApp fp = do
         , _history = []
         , _future = []
         , _terminalSize = (sx, sy)
+        , _preferences = pref
         }
   initialVty <- builder
   void $ customMain initialVty builder Nothing mindAppInstructions appState
@@ -125,10 +154,10 @@ mindAppInstructions = App
           }
 
 drawMindMaps :: MindApp -> Widget Name
-drawMindMaps st = collapseImage . limitImage (view terminalSize st) $
-  shiftImage (join (***) (0-) $ view screenOffset $ st) $
-  drawCursor st . foldr M.union M.empty $
-  drawBubbleTree <$> view (saveState . rootBubbles) st
+drawMindMaps st = collapseImage . limitImage (st^.terminalSize) $
+  shiftImage (join (***) (0-) $ st^.screenOffset) $
+  drawCursor st $ foldr M.union M.empty $
+  drawBubbleTree <$> st^.saveState.rootBubbles
 
 limitImage :: (Int, Int) -> M.Map (Int, Int) a -> M.Map (Int, Int) a
 limitImage p = M.filterWithKey (return . uncurry (&&) . onBoth (>) p)
@@ -139,13 +168,13 @@ handleEvent (VtyEvent (V.EvResize x y)) = modify $ set terminalSize (x, y)
 handleEvent _ = return ()
 
 mkAttrMap :: MindApp -> AttrMap
-mkAttrMap _ = attrMap (fg V.white) . foldr (<>) [] $
+mkAttrMap st = attrMap (fg V.white) . foldr (<>) [] $
   [ bubbleGroup
   , cursorGroup
   ] where
     bubbleGroup = do
-      variant <- attrName <$> ["bubble", "bubble-border"]
-      (layer, style) <- second fg <$>
+      variant <- ["bubble", "bubble-border"]
+      (layer, color) <-
         [ (0 :: Int, V.blue)
         , (1, V.cyan)
         , (2, V.green)
@@ -153,7 +182,10 @@ mkAttrMap _ = attrMap (fg V.white) . foldr (<>) [] $
         -- , (4, V.red)
         -- , (5, V.magenta)
         ]
-      return $ (variant <> stimesMonoid layer (attrName "sub"), style)
+      let style = if st^.preferences.colorfulMode
+                    then on V.black
+                    else fg
+      return $ (attrName variant <> stimesMonoid layer (attrName "sub"), style color)
     cursorGroup = do
       (variant, color) <-
         [ (mempty, V.white)
@@ -201,14 +233,14 @@ fileVersion = 1
 instance ToJSON MindMap where
   toJSON mindmap = object
     [ "version" .= fileVersion
-    , "root-bubbles" .= view rootBubbles mindmap
+    , "root-bubbles" .= (mindmap^.rootBubbles)
     ]
 
 instance ToJSON Bubble where
   toJSON b = object
-    [ "contents" .= view contents b
-    , "children" .= view children b
-    , "anchor-pos" .= view anchorPos b
+    [ "contents" .= (b^.contents)
+    , "children" .= (b^.children)
+    , "anchor-pos" .= (b^.anchorPos)
     ]
 
 fromValue :: Value -> Maybe Object
@@ -265,16 +297,15 @@ handleKey (V.KEnter) [] = do
 handleKey (V.KBS) [] = do
   focus' <- view focus <$> get
   case focus' of
-    Right (sel@(BubbleFocus {_insertMode = True})) -> do
-      let p = view subPos sel
-      if p^._1 > 0
+    Right (sel@(BubbleFocus {_insertMode = True})) ->
+      if sel^.subPos._1 > 0
       then do
         let backspaceOnLine =
-              foldr (\(n, c) -> if n + 1 == view _1 p then id else (c:)) []
+              foldr (\(n, c) -> if n + 1 == sel^.subPos._1 then id else (c:)) []
               <<< mkIndices
         modify $ over (focus . _Right . bubbleZip . _1 . contents) $ 
           unlines
-          <<< foldr (\(n, cs) -> if n == view _2 p then (backspaceOnLine cs:) else (cs:)) []
+          <<< foldr (\(n, cs) -> if n == sel^.subPos._2 then (backspaceOnLine cs:) else (cs:)) []
           <<< mkIndices
           <<< lines
         modify $ over (focus . _Right . subPos . _1) (+ (-1))
@@ -283,7 +314,7 @@ handleKey (V.KBS) [] = do
             combineLine bs [] = [bs]
         modify $ over (focus . _Right . bubbleZip . _1 . contents) $
           unlines
-          <<< foldr (\(n, cs) -> if n + 1 == p^._2 then combineLine cs else (cs:)) []
+          <<< foldr (\(n, cs) -> if n + 1 == sel^.subPos._2 then combineLine cs else (cs:)) []
           <<< mkIndices
           <<< lines
     _ -> return ()
@@ -471,8 +502,7 @@ unselect = do
       if sel^.insertMode
         then modify $ set (focus . _Right . insertMode) False
         else do
-          modify $ set focus . Left $ onBoth (+) (sel^.subPos) $
-            view (_1 . anchorPos) (sel^.bubbleZip)
+          modify $ set focus . Left $ onBoth (+) (sel^.subPos) (sel^.bubbleZip._1.anchorPos)
           modify $ over (saveState . rootBubbles) $ (:) $ unzipBubbles (sel^.bubbleZip)
 
 selectAtCursor :: MonadState MindApp m => m ()
@@ -484,7 +514,7 @@ selectAtCursor = do
     (Just zipper, Left p) -> do
       modify $ set (saveState . rootBubbles) rest
       modify $ set focus . Right $ BubbleFocus
-        { _subPos = onBoth (-) p (view (_1 . anchorPos) zipper)
+        { _subPos = onBoth (-) p (zipper^._1.anchorPos)
         , _bubbleZip = zipper
         , _insertMode = False
         }
@@ -496,7 +526,7 @@ inTreeUnderCursor b = do
   if onPoint
     then return $ Just (b, [])
     else do
-      (mchild, childs) <- sieveM inTreeUnderCursor $ view children b
+      (mchild, childs) <- sieveM inTreeUnderCursor $ b^.children
       case mchild of
         Nothing -> return Nothing
         Just (c, cs) -> do
@@ -508,10 +538,9 @@ underCursor b = do
   target <- view focus <$> get
   case target of
     Left p -> do
-      let p0 = view anchorPos b
+      let p0 = b^.anchorPos
           p1 = onBoth (\x -> (+x) . max 1) p0
-             <<< stringWidth &&& stringHeight
-             <<< view contents $ b
+             <<< stringWidth &&& stringHeight $ b^.contents
       return $ (uncurry (&&) $ onBoth (>=) p p0)
               && (uncurry (&&) $ onBoth (<=) p p1)
     Right _ -> return False
@@ -524,41 +553,40 @@ unzipBubbles = uncurry $ foldr (flip $ over children . (:))
  -------------------------------}
 
 drawCursor :: MindApp -> Image -> Image
-drawCursor st = case view focus st of
+drawCursor st = case st^.focus of
                   Left p -> over (at p) $ _drawCursor mempty
-                  Right foc' ->
-                    let p = view subPos foc'
-                        bs = view bubbleZip foc'
-                        ins = view insertMode foc'
-                        p' = onBoth (+) p $ view (_1 . anchorPos) bs
-                        a = attrName $ if ins then "insert" else "selected"
-                        drawCursor' = over (at p') (_drawCursor a)
-                    in (drawCursor' .) . M.union . drawBubbleTree . unzipBubbles $ bs
+                  Right sel ->
+                    let p = onBoth (+) (sel^.subPos) (sel^.bubbleZip._1.anchorPos)
+                        a = attrName $ if sel^.insertMode
+                                          then "insert"
+                                          else "selected"
+                        drawCursor' = over (at p) (_drawCursor a)
+                    in (drawCursor' .) . M.union . drawBubbleTree . unzipBubbles $ sel^.bubbleZip
   where _drawCursor m Nothing = Just (' ', attrName "cursor" <> m)
         _drawCursor m (Just (c, _)) = Just (c, attrName "cursor" <> m)
 
 drawBubbleTree :: Bubble -> Image
 drawBubbleTree b = foldl M.union (drawBubble 0 b) $
-  drawBubbleBranch 1 (bubbleCenter b) <$> view children b
+  drawBubbleBranch 1 (bubbleCenter b) <$> b^.children
 
 drawBubbleBranch :: Int -> (Int, Int) -> Bubble -> Image
 drawBubbleBranch n p b = foldl M.union (drawChildBubble n p b) $
-  drawBubbleBranch (n + 1) (bubbleCenter b) <$> view children b
+  drawBubbleBranch (n + 1) (bubbleCenter b) <$> b^.children
 
 drawChildBubble :: Int -> (Int, Int) -> Bubble -> Image
 drawChildBubble n p b = M.union (drawBubble n b) (drawSteppedLine 2 '~' mempty p $ bubbleCenter b)
 
 drawBubble :: Int -> Bubble -> Image
-drawBubble n b = shiftImage (view anchorPos b)
+drawBubble n b = shiftImage (b^.anchorPos)
                . imageBorder (attrName "bubble-border" <> stimesMonoid n (attrName "sub"))
                . imageString (attrName "bubble" <> stimesMonoid n (attrName "sub"))
                . (\cs -> if (foldr ((&&) . (== "")) True . lines $ cs) then " " else cs)
-               . view contents $ b
+               $ b^.contents
 
 bubbleCenter :: Bubble -> (Int, Int)
-bubbleCenter b = onBoth (+) (view anchorPos b)
+bubbleCenter b = onBoth (+) (b^.anchorPos)
                 <<< join (***) (flip quot 2)
-                <<< stringWidth &&& stringHeight $ view contents b
+                <<< stringWidth &&& stringHeight $ b^.contents
 
 {------------------------------
  - Underlying system
