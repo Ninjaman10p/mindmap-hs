@@ -4,7 +4,7 @@ module Main where
 import Brick
 import qualified Graphics.Vty as V
 
-import Control.Lens (makeLenses, view, over, set, at, Lens', _1, _2)
+import Control.Lens (makeLenses, view, over, set, at, Lens', _1, _2, to, (^.))
 import Control.Lens.Combinators (_Right)
 import Control.Monad
 -- import Control.Concurrent
@@ -265,9 +265,9 @@ handleKey (V.KEnter) [] = do
 handleKey (V.KBS) [] = do
   focus' <- view focus <$> get
   case focus' of
-    Right (focus''@(BubbleFocus {_insertMode = True})) -> do
-      let p = view subPos focus''
-      if view _1 p > 0
+    Right (sel@(BubbleFocus {_insertMode = True})) -> do
+      let p = view subPos sel
+      if p^._1 > 0
       then do
         let backspaceOnLine =
               foldr (\(n, c) -> if n + 1 == view _1 p then id else (c:)) []
@@ -283,7 +283,7 @@ handleKey (V.KBS) [] = do
             combineLine bs [] = [bs]
         modify $ over (focus . _Right . bubbleZip . _1 . contents) $
           unlines
-          <<< foldr (\(n, cs) -> if n + 1 == view _2 p then combineLine cs else (cs:)) []
+          <<< foldr (\(n, cs) -> if n + 1 == p^._2 then combineLine cs else (cs:)) []
           <<< mkIndices
           <<< lines
     _ -> return ()
@@ -296,21 +296,21 @@ handleKChar :: Char -> EventM Name MindApp ()
 handleKChar c = do
   focus' <- view focus <$> get
   case focus' of
-    Right (focus''@(BubbleFocus {_insertMode = True})) -> do
-      let contentLines = lines . view (bubbleZip . _1 . contents) $ focus''
-          p = view subPos focus''
-      if length contentLines == 0
+    Right (sel@(BubbleFocus {_insertMode = True})) -> do
+      if sel^.bubbleZip._1.contents.to (length . lines) == 0
         then modify $ set (focus . _Right . bubbleZip . _1 . contents) [c]
         else do
-          let insertOnLine cs
-                | length cs <= view _1 p = cs <> [c]
+          let p = sel^.subPos
+              insertOnLine cs
+                | length cs <= p^._1 = cs <> [c]
                 | otherwise =  
-                    foldr (\(n, c') -> if n == view _1 p then (c:) . (c':) else (c':)) []
+                    foldr (\(n, c') -> if n == p^._1 then (c:) . (c':) else (c':)) []
                     . mkIndices $ cs
-          modify $ set (focus . _Right . bubbleZip . _1 . contents) $
+          modify $ over (focus . _Right . bubbleZip . _1 . contents) $
             unlines
-            <<< foldr (\(n, cs) -> if n == view _2 p then (insertOnLine cs:) else (cs:)) []
-            <<< mkIndices $ contentLines
+            <<< foldr (\(n, cs) -> if n == p^._2 then (insertOnLine cs:) else (cs:)) []
+            <<< mkIndices
+            <<< lines
       modify $ over (focus . _Right . subPos) $
         if c == '\n'
           then const 0 *** (+1)
@@ -351,9 +351,9 @@ collapseKeyStack = do
                   , _bubbleZip = (newBubble, [])
                   , _insertMode = True
                   }
-              Right focus'' -> do
-                let p = onBoth (+) (view subPos focus'')
-                                   (view (bubbleZip . _1 . anchorPos ) focus'')
+              Right sel -> do
+                let p = onBoth (+) (sel^.subPos)
+                                   (sel^.bubbleZip._1.anchorPos)
                     newBubble = Bubble
                       { _contents = ""
                       , _anchorPos = p
@@ -361,8 +361,7 @@ collapseKeyStack = do
                       }
                 modify $ set focus . Right $ BubbleFocus
                   { _subPos = (0, 0)
-                  , _bubbleZip = (newBubble, uncurry (flip (<>) . return)
-                                             . view bubbleZip $ focus'')
+                  , _bubbleZip = (newBubble, uncurry (flip (<>) . return) $ sel^.bubbleZip)
                   , _insertMode = True
                   }
           'z':'z':_ -> Just . Left $ do
@@ -426,8 +425,8 @@ cursorTruePos = do
   focus' <- view focus <$> get
   case focus' of
     Left p -> return p
-    Right focus'' -> return $
-      onBoth (+) (view subPos focus'') (view (bubbleZip . _1 . anchorPos) focus'')
+    Right sel -> return $
+      onBoth (+) (sel^.subPos) (sel^.bubbleZip._1.anchorPos)
 
 updateHistory :: MonadState MindApp m => m ()
 updateHistory = do
@@ -440,14 +439,14 @@ deleteFocused = do
   focus' <- view focus <$> get
   case focus' of
     Left _ -> return ()
-    Right focus'' -> do
-      let notDeletedZip = view (bubbleZip . _2) focus''
+    Right sel -> do
+      let notDeletedZip = sel^.bubbleZip._2
       case initMay &&& lastMay $ notDeletedZip of
         (Just bs, Just b) -> do
           modify $ set (focus . _Right . bubbleZip) (b, bs)
           unselect
         _ -> do
-          let p = onBoth (+) (view subPos focus'') (view (bubbleZip . _1 . anchorPos) focus'')
+          let p = onBoth (+) (sel^.subPos) (sel^.bubbleZip._1.anchorPos)
           modify $ set focus $ Left p
 
 enterInsert :: MonadState MindApp m => m ()
@@ -468,15 +467,13 @@ unselect = do
   focus' <- view focus <$> get
   case focus' of
     Left _ -> return ()
-    Right focus'' -> do
-      let p = view subPos focus''
-          zs = view bubbleZip focus''
-          ins = view insertMode focus''
-      if ins
+    Right sel -> do
+      if sel^.insertMode
         then modify $ set (focus . _Right . insertMode) False
         else do
-          modify $ set focus . Left $ onBoth (+) p $ view (_1 . anchorPos) zs
-          modify $ over (saveState . rootBubbles) . (:) $ unzipBubbles zs
+          modify $ set focus . Left $ onBoth (+) (sel^.subPos) $
+            view (_1 . anchorPos) (sel^.bubbleZip)
+          modify $ over (saveState . rootBubbles) $ (:) $ unzipBubbles (sel^.bubbleZip)
 
 selectAtCursor :: MonadState MindApp m => m ()
 selectAtCursor = do
