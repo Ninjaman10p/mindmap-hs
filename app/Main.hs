@@ -13,6 +13,8 @@ import System.Directory
 import qualified System.Console.Terminal.Size as Terminal
 import Safe (lastMay, initMay)
 
+import Data.List.Extra ((!?))
+
 import Data.Aeson
 import Data.Aeson.Types (Parser)
 
@@ -128,7 +130,7 @@ drawMindMaps st = collapseImage . limitImage (view terminalSize st) $
   drawBubbleTree <$> view (saveState . rootBubbles) st
 
 limitImage :: (Int, Int) -> M.Map (Int, Int) a -> M.Map (Int, Int) a
-limitImage p = M.filterWithKey (return . uncurry (&&) <<< onBoth (>) p)
+limitImage p = M.filterWithKey (return . uncurry (&&) . onBoth (>) p)
 
 handleEvent :: BrickEvent Name Event -> EventM Name MindApp ()
 handleEvent (VtyEvent (V.EvKey k ms)) = handleKey k ms
@@ -595,7 +597,7 @@ shiftImage :: (Int, Int) -> Image -> Image
 shiftImage = M.mapKeys . onBoth (+)
 
 imageString :: AttrName -> String -> Image
-imageString a = chartPositions . (fmap $ fmap (,a)) . lines
+imageString a = M.map (,a) . chartPositionsFilled ' ' . lines
 
 uniformMap :: Ord k => a -> [k] -> M.Map k a
 uniformMap a = M.fromList . fmap (,a)
@@ -626,6 +628,12 @@ getImageMinBounds = M.foldrWithKey _reduce Nothing
 
 getImageBounds :: M.Map (Int, Int) a -> (Int, Int)
 getImageBounds = M.foldrWithKey (const . onBoth max) (0, 0)
+
+chartPositionsFilled :: a -> [[a]] -> M.Map (Int, Int) a
+chartPositionsFilled d xss = M.fromList $ mapPos <$> positions
+  where positions = (,) <$> [0..(foldr (max . length) 1 xss) - 1]
+                        <*> [0..(length xss) - 1]
+        mapPos (x, y) = ((x, y), fromMaybe d $ (xss !? y) >>= (!? x))
 
 chartPositions :: [[a]] -> M.Map (Int, Int) a
 chartPositions = M.fromList . join

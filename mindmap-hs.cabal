@@ -20,16 +20,17 @@ name:               mindmap-hs
 -- PVP summary:     +-+------- breaking API changes
 --                  | | +----- non-breaking API additions
 --                  | | | +--- code changes with no API change
-version:            0.1.0.0
+version:            0.1.2.1
 
 -- A short (one-line) description of the package.
--- synopsis:
+synopsis:           Create mindmaps from the terminal.
 
 -- A longer description of the package.
--- description:
+description:        A program to create mindmaps from inside a *NIX terminal.
+                    Depends on Vty, so only works on Linux.
 
 -- The license under which the package is released.
-license:            NONE
+license:            GPL-3.0-or-later
 
 -- The package author(s).
 author:             Peter Gow
@@ -76,7 +77,8 @@ executable mindmap-hs
                       ghc,
                       directory,
                       terminal-size,
-                      safe
+                      safe,
+                      extra
 
     -- Directories containing source files.
     hs-source-dirs:   app

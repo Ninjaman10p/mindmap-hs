@@ -21,3 +21,5 @@
 * Added `zz` to center the screen on the cursor
 * Fixed issue where `dd` rearrange the tree
 * Escape now clears the keystack
+* Program no longer tries to render offscreen elements
+* Fixed issue where connecting lines would be drawn inside of bubbles
