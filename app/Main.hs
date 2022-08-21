@@ -5,6 +5,7 @@ import Brick
 import qualified Graphics.Vty as V
 
 import Control.Lens (makeLenses, view, over, set, at, Lens', _1, _2)
+import Control.Lens.Combinators (_Right)
 import Control.Monad
 -- import Control.Concurrent
 import Control.Arrow
@@ -266,14 +267,26 @@ handleKey (V.KBS) [] = do
   case focus' of
     Right (focus''@(BubbleFocus {_insertMode = True})) -> do
       let p = view subPos focus''
-          contentLines = lines . view (bubbleZip . _1 . contents) $ focus''
-          bsLine = foldr (\(n, c) -> if n + 1 == view _1 p then id else (c:)) [] . mkIndices
-      modify $ over focus . right . set (bubbleZip . _1 . contents) . unlines $ 
-        foldr (\(n, cs) -> if n == view _2 p then (bsLine cs:) else (cs:)) [] $
-          mkIndices contentLines
-      modify $ over focus . right $ over (subPos . _1) (+ (-1))
+      if view _1 p > 0
+      then do
+        let backspaceOnLine =
+              foldr (\(n, c) -> if n + 1 == view _1 p then id else (c:)) []
+              <<< mkIndices
+        modify $ over (focus . _Right . bubbleZip . _1 . contents) $ 
+          unlines
+          <<< foldr (\(n, cs) -> if n == view _2 p then (backspaceOnLine cs:) else (cs:)) []
+          <<< mkIndices
+          <<< lines
+        modify $ over (focus . _Right . subPos . _1) (+ (-1))
+      else do
+        let combineLine bs (cs:css) = (bs <> cs):css
+            combineLine bs [] = [bs]
+        modify $ over (focus . _Right . bubbleZip . _1 . contents) $
+          unlines
+          <<< foldr (\(n, cs) -> if n + 1 == view _2 p then combineLine cs else (cs:)) []
+          <<< mkIndices
+          <<< lines
     _ -> return ()
-    
 handleKey (V.KEsc) [] = do
   modify $ set keyStack []
   unselect
@@ -287,19 +300,21 @@ handleKChar c = do
       let contentLines = lines . view (bubbleZip . _1 . contents) $ focus''
           p = view subPos focus''
       if length contentLines == 0
-        then modify $ over focus . right . set (bubbleZip . _1 . contents) $ [c]
+        then modify $ set (focus . _Right . bubbleZip . _1 . contents) [c]
         else do
-          let insertLine l =
-                if length l <= view _1 p
-                  then (l <> [c])
-                  else foldr (\(n, c') -> if n == view _1 p then (c:) . (c':) else (c':)) []
-                       . mkIndices $ l
-          modify $ over focus . right . set (bubbleZip . _1 . contents) . unlines $
-            foldr (\(n, cs) -> if n == view _2 p then (insertLine cs:) else (cs:)) [] $
-              mkIndices $ contentLines
-      if c == '\n'
-        then modify $ over focus . right $ set (subPos . _1) 0 . over (subPos . _2) (+1)
-        else modify $ over focus . right $ over (subPos . _1) (+1)
+          let insertOnLine cs
+                | length cs <= view _1 p = cs <> [c]
+                | otherwise =  
+                    foldr (\(n, c') -> if n == view _1 p then (c:) . (c':) else (c':)) []
+                    . mkIndices $ cs
+          modify $ set (focus . _Right . bubbleZip . _1 . contents) $
+            unlines
+            <<< foldr (\(n, cs) -> if n == view _2 p then (insertOnLine cs:) else (cs:)) []
+            <<< mkIndices $ contentLines
+      modify $ over (focus . _Right . subPos) $
+        if c == '\n'
+          then const 0 *** (+1)
+          else first (+1)
     _ -> do
       modify $ over keyStack (c :) -- stored in REVERSE ORDER
       collapseKeyStack
@@ -308,10 +323,10 @@ handleMove :: MonadState MindApp m => Lens' (Int, Int) Int -> Int -> m ()
 handleMove l n = modify $ over focus $ over l (+n) +++ over (subPos . l) (+n)
 
 handleShift :: MonadState MindApp m => Lens' (Int, Int) Int -> Int -> m ()
-handleShift l n = modify $ over focus . right . over (bubbleZip . _1 . anchorPos . l) $ (+n)
+handleShift l n = modify $ over (focus . _Right . bubbleZip . _1 . anchorPos . l) $ (+n)
 
 handleShiftDeep :: MonadState MindApp m => Lens' (Int, Int) Int -> Int -> m ()
-handleShiftDeep l n = modify . over focus . right . over (bubbleZip . _1) $ _handleShiftDeep
+handleShiftDeep l n = modify $ over (focus . _Right . bubbleZip . _1) _handleShiftDeep
   where _handleShiftDeep = over (anchorPos . l) (+n)
                          . over children (fmap $ _handleShiftDeep)
 
@@ -356,7 +371,7 @@ collapseKeyStack = do
             modify $ set screenOffset $ onBoth (-) p $
               join (***) (`quot` 2) sxy
           'c':'c':_ -> Just . Right $ do
-            modify $ over focus . right . set (bubbleZip . _1 . contents) $ ""
+            modify $ set (focus . _Right . bubbleZip . _1 . contents) $ ""
             enterInsert
           '\DC2':cs -> Just . Right $ motionLoop cs redo
           'u':cs -> Just . Left $ motionLoop cs undo
@@ -429,14 +444,14 @@ deleteFocused = do
       let notDeletedZip = view (bubbleZip . _2) focus''
       case initMay &&& lastMay $ notDeletedZip of
         (Just bs, Just b) -> do
-          modify $ over focus . right . set bubbleZip $ (b, bs)
+          modify $ set (focus . _Right . bubbleZip) (b, bs)
           unselect
         _ -> do
           let p = onBoth (+) (view subPos focus'') (view (bubbleZip . _1 . anchorPos) focus'')
           modify $ set focus $ Left p
 
 enterInsert :: MonadState MindApp m => m ()
-enterInsert = modify $ over focus . right $ set insertMode True
+enterInsert = modify $ set (focus . _Right . insertMode) True
 
 handleMotion :: MonadState MindApp m => String -> Lens' (Int, Int) Int -> Int -> m ()
 handleMotion ('g':cs) l = motionLoop cs . handleShift l
@@ -458,7 +473,7 @@ unselect = do
           zs = view bubbleZip focus''
           ins = view insertMode focus''
       if ins
-        then modify $ over focus . right $ set insertMode False
+        then modify $ set (focus . _Right . insertMode) False
         else do
           modify $ set focus . Left $ onBoth (+) p $ view (_1 . anchorPos) zs
           modify $ over (saveState . rootBubbles) . (:) $ unzipBubbles zs
