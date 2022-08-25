@@ -23,3 +23,4 @@
 * Escape now clears the keystack
 * Program no longer tries to render offscreen elements
 * Fixed issue where connecting lines would be drawn inside of bubbles
+* Added basic caching to reduce lag when moving the cursor around

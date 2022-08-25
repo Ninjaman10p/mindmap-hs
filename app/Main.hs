@@ -12,7 +12,7 @@ import Control.Arrow
 import System.Environment
 import System.Directory
 import qualified System.Console.Terminal.Size as Terminal
-import Safe (lastMay, initMay)
+import Safe (lastMay, initMay, tailMay)
 
 import Data.List.Extra ((!?))
 import GHC.Data.Maybe (firstJust)
@@ -34,6 +34,8 @@ type Image = M.Map (Int, Int) (Char, AttrName)
 
 data Preferences = Preferences
   { _colorfulMode :: Bool
+  , _lightMode :: Bool
+  , _showBorders :: Bool
   } deriving (Eq, Ord, Show)
 $(makeLenses ''Preferences)
 
@@ -66,6 +68,7 @@ data MindApp = MindApp
   , _future :: [MindMap]
   , _terminalSize :: (Int, Int)
   , _preferences :: Preferences
+  , _displayCache :: Image
   } deriving (Eq, Ord, Show)
 $(makeLenses ''MindApp)
 
@@ -82,12 +85,23 @@ main = do
       Nothing -> putStrLn $ helpMessage progname
       Just fp -> runMindApp fp $ getPreferences args
       
+redraw :: MonadState MindApp m => m ()
+redraw = do
+  st <- get
+  modify $ set displayCache $
+    shiftImage (join (***) (0-) $ st^.screenOffset) $
+    foldr M.union M.empty $
+    drawBubbleTree (st^.preferences.showBorders) <$> st^.saveState.rootBubbles
+
 getPreferences :: [String] -> Preferences
 getPreferences args = Preferences
   { _colorfulMode = getBoolOpt "colorful" False args
+  , _lightMode = getBoolOpt "light-mode" False args
+  , _showBorders = getBoolOpt "borders" True args
   }
 
 getFileTarget :: [String] -> Maybe String
+getFileTarget (cs:css) | take 2 cs == "--" = getFileTarget css
 getFileTarget (fp:_) = Just fp
 getFileTarget _ = Nothing
 
@@ -98,13 +112,19 @@ getBoolOpt cs = foldl $ flip parseBoolArg
                          | otherwise = id
 
 getOpts :: String -> [String] -> Maybe String
-getOpts cs (arg:val:args) | "--" <> cs == arg = firstJust (getOpts cs args) (Just val)
+getOpts cs (arg:args) | "--" <> cs == argn = firstJust (getOpts cs args) (tailMay argv)
+  where (argn, argv) = break (== '=') arg
 getOpts cs (_:args) = getOpts cs args
 getOpts _ _ = Nothing
 
 helpMessage :: String -> String
 helpMessage progname = unlines
-  [ "Usage: " <> progname <> " FILENAME"
+  [ "Usage: " <> progname <> " FILENAME [OPTIONS]"
+  , ""
+  , "OPTIONS:"
+  , "  --[no-]light-mode: Change to use a light background (default: off)"
+  , "  --[no-]colorful: Fill bubbles with their color (default: off)"
+  , "  --[no-]borders: Enable/Disable drawing borders (default: on)"
   , ""
   , "KEYBINDINGS:"
   , "  [hjkl]: move cursor"
@@ -113,6 +133,7 @@ helpMessage progname = unlines
   , "  g[hjkl]: move currently selected bubble"
   , "  G[hjkl]: as per g[hjkl] but also move all child bubbles"
   , "  i/a: enter insert mode while bubble is selected"
+  , "  cc: Rewrite the current bubble"
   , "  escape: leave insert mode, or unselect bubble"
   , "  ZZ: save and quit"
   , "  ZQ: quit WITHOUT saving"
@@ -140,6 +161,7 @@ runMindApp fp pref = do
         , _future = []
         , _terminalSize = (sx, sy)
         , _preferences = pref
+        , _displayCache = M.empty
         }
   initialVty <- builder
   void $ customMain initialVty builder Nothing mindAppInstructions appState
@@ -149,18 +171,14 @@ mindAppInstructions = App
           { appDraw = return . drawMindMaps
           , appChooseCursor = neverShowCursor
           , appHandleEvent = handleEvent
-          , appStartEvent = return ()
+          , appStartEvent = redraw
           , appAttrMap = mkAttrMap
           }
 
 drawMindMaps :: MindApp -> Widget Name
-drawMindMaps st = collapseImage . limitImage (st^.terminalSize) $
-  shiftImage (join (***) (0-) $ st^.screenOffset) $
-  drawCursor st $ foldr M.union M.empty $
-  drawBubbleTree <$> st^.saveState.rootBubbles
-
-limitImage :: (Int, Int) -> M.Map (Int, Int) a -> M.Map (Int, Int) a
-limitImage p = M.filterWithKey (return . uncurry (&&) . onBoth (>) p)
+drawMindMaps st = collapseImage . fitImage (' ', mempty) (st^.terminalSize) $
+  drawCursor st $
+  st^.displayCache
 
 handleEvent :: BrickEvent Name Event -> EventM Name MindApp ()
 handleEvent (VtyEvent (V.EvKey k ms)) = handleKey k ms
@@ -168,10 +186,13 @@ handleEvent (VtyEvent (V.EvResize x y)) = modify $ set terminalSize (x, y)
 handleEvent _ = return ()
 
 mkAttrMap :: MindApp -> AttrMap
-mkAttrMap st = attrMap (fg V.white) . foldr (<>) [] $
+mkAttrMap st = attrMap defAttr . foldr (<>) [] $
   [ bubbleGroup
   , cursorGroup
   ] where
+    defAttr = if st^.preferences.lightMode
+                 then V.black `on` V.white
+                 else fg V.white
     bubbleGroup = do
       variant <- ["bubble", "bubble-border"]
       (layer, color) <-
@@ -188,11 +209,12 @@ mkAttrMap st = attrMap (fg V.white) . foldr (<>) [] $
       return $ (attrName variant <> stimesMonoid layer (attrName "sub"), style color)
     cursorGroup = do
       (variant, color) <-
-        [ (mempty, V.white)
+        [ (mempty, if st^.preferences.lightMode then V.black else V.white)
         , (attrName "insert", V.blue)
         , (attrName "selected", V.yellow)
         ]
-      return $ (attrName "cursor" <> variant, V.black `on` color)
+      let opFgCol = if st^.preferences.lightMode then V.white else V.black
+      return $ (attrName "cursor" <> variant, opFgCol `on` color)
 
 newMindMap :: MindMap
 -- newMindMap = MindMap
@@ -346,6 +368,7 @@ handleKChar c = do
         if c == '\n'
           then const 0 *** (+1)
           else first (+1)
+      redraw
     _ -> do
       modify $ over keyStack (c :) -- stored in REVERSE ORDER
       collapseKeyStack
@@ -395,17 +418,20 @@ collapseKeyStack = do
                   , _bubbleZip = (newBubble, uncurry (flip (<>) . return) $ sel^.bubbleZip)
                   , _insertMode = True
                   }
+            redraw
           'z':'z':_ -> Just . Left $ do
             p <- cursorTruePos
             sxy <- view terminalSize <$> get
             modify $ set screenOffset $ onBoth (-) p $
               join (***) (`quot` 2) sxy
+            redraw
           'c':'c':_ -> Just . Right $ do
             modify $ set (focus . _Right . bubbleZip . _1 . contents) $ ""
             enterInsert
-          '\DC2':cs -> Just . Right $ motionLoop cs redo
-          'u':cs -> Just . Left $ motionLoop cs undo
-          'd':'d':_ -> Just . Right $ deleteFocused
+            redraw
+          '\DC2':cs -> Just . Right $ motionLoop cs redo >> redraw
+          'u':cs -> Just . Left $ motionLoop cs undo >> redraw
+          'd':'d':_ -> Just . Right $ deleteFocused >> redraw
           'Q':'Z':_ -> Just . Left $ halt
           'Z':'Z':_ -> Just . Left $ saveMindMap >> halt
           'j':cs -> Just . Left $ handleMotion cs _2 1
@@ -484,9 +510,9 @@ enterInsert :: MonadState MindApp m => m ()
 enterInsert = modify $ set (focus . _Right . insertMode) True
 
 handleMotion :: MonadState MindApp m => String -> Lens' (Int, Int) Int -> Int -> m ()
-handleMotion ('g':cs) l = motionLoop cs . handleShift l
-handleMotion ('G':cs) l = motionLoop cs . handleShiftDeep l
-handleMotion ('z':cs) l = motionLoop cs . moveScreen l
+handleMotion ('g':cs) l = (>> redraw) . motionLoop cs . handleShift l
+handleMotion ('G':cs) l = (>> redraw) . motionLoop cs . handleShiftDeep l
+handleMotion ('z':cs) l = (>> redraw) . motionLoop cs . moveScreen l
 handleMotion cs l = motionLoop cs . handleMove l
 
 motionLoop :: MonadState MindApp m => String -> m () -> m ()
@@ -552,36 +578,49 @@ unzipBubbles = uncurry $ foldr (flip $ over children . (:))
  - Drawing Nodes
  -------------------------------}
 
+fitImage :: a -> (Int, Int) -> M.Map (Int, Int) a -> M.Map (Int, Int) a
+fitImage dflt p img = limitImage p img `M.union` M.fromList [(p, dflt)]
+
+limitImage :: (Int, Int) -> M.Map (Int, Int) a -> M.Map (Int, Int) a
+limitImage p = M.filterWithKey (return . uncurry (&&) . onBoth (>) p)
+
 drawCursor :: MindApp -> Image -> Image
 drawCursor st = case st^.focus of
-                  Left p -> over (at p) $ _drawCursor mempty
+                  Left p -> over (at $ onBoth (-) p $ st^.screenOffset) $ _drawCursor mempty
                   Right sel ->
                     let p = onBoth (+) (sel^.subPos) (sel^.bubbleZip._1.anchorPos)
                         a = attrName $ if sel^.insertMode
                                           then "insert"
                                           else "selected"
-                        drawCursor' = over (at p) (_drawCursor a)
-                    in (drawCursor' .) . M.union . drawBubbleTree . unzipBubbles $ sel^.bubbleZip
+                        drawCursor' = over (at $ onBoth (-) p $ st^.screenOffset) (_drawCursor a)
+                    in (drawCursor' .) 
+                       <<< drawAt (join (***) (0-) $ st^.screenOffset)
+                       <<< drawBubbleTree (st^.preferences.showBorders) 
+                       <<< unzipBubbles $ sel^.bubbleZip
   where _drawCursor m Nothing = Just (' ', attrName "cursor" <> m)
         _drawCursor m (Just (c, _)) = Just (c, attrName "cursor" <> m)
 
-drawBubbleTree :: Bubble -> Image
-drawBubbleTree b = foldl M.union (drawBubble 0 b) $
-  drawBubbleBranch 1 (bubbleCenter b) <$> b^.children
+drawBubbleTree :: Bool -> Bubble -> Image
+drawBubbleTree showB b = foldl M.union (drawBubble showB 0 b) $
+  drawBubbleBranch showB 1 (bubbleCenter b) <$> b^.children
 
-drawBubbleBranch :: Int -> (Int, Int) -> Bubble -> Image
-drawBubbleBranch n p b = foldl M.union (drawChildBubble n p b) $
-  drawBubbleBranch (n + 1) (bubbleCenter b) <$> b^.children
+drawBubbleBranch :: Bool -> Int -> (Int, Int) -> Bubble -> Image
+drawBubbleBranch showB n p b = foldl M.union (drawChildBubble showB n p b) $
+  drawBubbleBranch showB (n + 1) (bubbleCenter b) <$> b^.children
 
-drawChildBubble :: Int -> (Int, Int) -> Bubble -> Image
-drawChildBubble n p b = M.union (drawBubble n b) (drawSteppedLine 2 '~' mempty p $ bubbleCenter b)
+drawChildBubble :: Bool -> Int -> (Int, Int) -> Bubble -> Image
+drawChildBubble showB n p b =
+  M.union (drawBubble showB n b) (drawSteppedLine 2 '~' mempty p $ bubbleCenter b)
 
-drawBubble :: Int -> Bubble -> Image
-drawBubble n b = shiftImage (b^.anchorPos)
-               . imageBorder (attrName "bubble-border" <> stimesMonoid n (attrName "sub"))
-               . imageString (attrName "bubble" <> stimesMonoid n (attrName "sub"))
-               . (\cs -> if (foldr ((&&) . (== "")) True . lines $ cs) then " " else cs)
-               $ b^.contents
+drawBubble :: Bool -> Int -> Bubble -> Image
+drawBubble showB n b =
+  shiftImage (b^.anchorPos)
+  <<< (if showB
+          then imageBorder (attrName "bubble-border" <> stimesMonoid n (attrName "sub"))
+          else id)
+  <<< imageString (attrName "bubble" <> stimesMonoid n (attrName "sub"))
+  <<< (\cs -> if (foldr ((&&) . (== "")) True . lines $ cs) then " " else cs)
+  $ b^.contents
 
 bubbleCenter :: Bubble -> (Int, Int)
 bubbleCenter b = onBoth (+) (b^.anchorPos)
